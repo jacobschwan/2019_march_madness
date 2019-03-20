@@ -1,0 +1,151 @@
+---
+title: "2019 March Madness Bracket"
+output: html_notebook
+---
+```{r}
+pacman::p_load(tidyverse, here, mRchmadness)
+```
+
+Since I don't have time to run my own model, I'll start with 538's predictions.
+
+```{r}
+if(!file.exists("fivethirtyeight_ncaa_forecasts.csv")) {
+    download.file("https://projects.fivethirtyeight.com/march-madness-api/2019/fivethirtyeight_ncaa_forecasts.csv",
+                  "fivethirtyeight_ncaa_forecasts.csv")
+}
+```
+
+```{r}
+fte_predictions <- read_csv("fivethirtyeight_ncaa_forecasts.csv") %>%
+    filter(gender == "mens")
+fte_predictions 
+```
+
+Setup bracket pool point system.
+
+```{r}
+points <- tibble(round = grep("^rd", names(fte_predictions), value = T),
+       base_points = c(0,1,2,4,8,16,32))
+```
+
+```{r}
+expected_points <- fte_predictions %>%
+    gather("round", "odds", starts_with("rd")) %>%
+    left_join(points) %>%
+    mutate(win_points = base_points + as.numeric(team_seed),
+           expected_points = win_points * odds)
+
+expected_points[expected_points$round == "rd1_win", c("win_points", "expected_points")] <- 0
+```
+
+```{r}
+expected_points %>%
+    mutate(team_name = fct_reorder(team_name, expected_points, sum)) %>%
+    ggplot(aes(x = team_name, y = expected_points, fill = round)) +
+    geom_col() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1))
+```
+
+```{r}
+library("mRchmadness")
+```
+
+```{r}
+head(pred.538.men.2018)
+```
+
+Who should we guess at for play in games?  Let's make a list of the losers to filter out
+
+```{r}
+play_in_losers <- fte_predictions %>%
+    filter(grepl("a|b", team_seed)) %>%
+    mutate(team_seed = str_replace(team_seed, "a|b", "")) %>%
+    group_by(team_region, team_seed) %>%
+    arrange(team_region, team_seed, rd1_win) %>%
+    summarise_all(first) %>%
+    ungroup() %>%
+    select(team_id, team_name)
+```
+
+Now let's make a 2019 538 prediction data set.
+
+```{r}
+pred_538_men_2019 <- fte_predictions %>%
+    anti_join(play_in_losers) %>%
+    mutate(team_name = fct_inorder(team_name)) %>%
+    select(name = team_name, 
+           round1 = rd2_win,
+           round2 = rd3_win,
+           round3 = rd4_win,
+           round4 = rd5_win,
+           round5 = rd6_win,
+           round6 = rd7_win)
+```
+
+Recreate simulation function...
+
+```{r}
+set.seed(1)
+
+rownames(pred_538_men_2019) <- pred_538_men_2019$name
+
+
+```
+
+Create derived probabilites
+
+```{r}
+
+prob_derived <- pred_538_men_2019 %>%
+    #select just the round columns
+    select(starts_with("round")) %>%
+    #make all values negative
+    mutate_all(funs(.*-1)) %>%
+    #create a matrix of differences
+    apply(MARGIN = 1, FUN = diff) %>%
+    #transpose the matrix
+    t() %>%
+    cbind(pred_538_men_2019$round6)
+    
+names(prob_derived) <- paste0("round", 1:6)
+
+```
+
+Set up the variable to stoare the path (in terms of game #) that each eam would need ot take to et to tthe championship. Ensures winner of round r won r-1
+
+```{r}
+path <- matrix(0, 64, 6)
+rownames(path) <- pred_538_men_2019$name
+```
+
+Simulate the winner of each round
+
+```{r}
+outcome <- matrix('', 63, 1)
+
+for (r in 1:6) {
+    (path[,r] <- max(path) + rep(seq(2^(6-r)), each = 2^r))
+    (groups <- split(pred_538_men_2019$name, f = path[,r]))
+    (outcome[round == r, ] <- t(sapply(groups, function(i) {
+        sample(i, 1, prob = prob_derived[i,r], replace = TRUE)})))
+}
+
+path
+groups
+```
+
+
+for (r in 2:6) {
+    #Identify winners of round r
+    (winners <- outcome[round == r, , drop = FALSE])
+    #Find all games winners must hav eown in r-1, ... 1
+    rows <- path[winners, 1:(r-1), drop = FALSE]
+    # Find which simulaiton to wich each of those games corresponds
+    columns <- matrix(rep(1:1, each = nrow(winners)), nrow = length(winners), ncol = r -1 )
+    #Replace the corresponding winner with the implied winners
+    outcome [cbind(c(rows), c(columns))] <- rep(winners, times = ncol(rows))
+}
+```
+
+
+

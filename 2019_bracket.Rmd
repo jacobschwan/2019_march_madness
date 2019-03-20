@@ -1,0 +1,118 @@
+---
+title: "2019 Bracket"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+pacman::p_load(tidyverse)
+```
+
+```{r}
+if(!file.exists("fivethirtyeight_ncaa_forecasts.csv")) {
+    download.file("https://projects.fivethirtyeight.com/march-madness-api/2019/fivethirtyeight_ncaa_forecasts.csv",
+                  "fivethirtyeight_ncaa_forecasts.csv")
+}
+fte_predictions <- read_csv("fivethirtyeight_ncaa_forecasts.csv") %>%
+    filter(gender == "mens") %>%
+    select(team_region, team_seed, team_name, everything())
+
+head(fte_predictions)
+
+```
+
+First let's deal with the "first four" teams. For fun we'll weight the teams by their likely hood of winning both the play-in and first round.
+
+```{r}
+first_four_winners <- fte_predictions %>%
+    filter(grepl("a|b", team_seed)) %>%
+    mutate(team_seed = str_replace(team_seed, "a|b", "")) %>%
+    group_by(team_region, team_seed) %>%
+    sample_n(size = 1, weight = rd2_win) %>%
+    ungroup()
+
+first_four_winners    
+```
+
+```{r}
+fte_64 <- fte_predictions %>%
+    filter(!grepl("a|b", team_seed)) %>%
+    bind_rows(first_four_winners) %>%
+    mutate(team_seed = as.integer(team_seed)) %>%
+    arrange(team_slot)
+```
+
+We'll pick our teams by the expected number of points we can earn. The bracket pool has a small upset bonus calculated by adding the seed number to the points earned each round.  538 has already done the work of giving us the winning percentage for each round.  We'll calculate the expected points for each round by multiplying the point earned if that team wins by the probability they will win that round.
+
+```{r}
+point_values <- tibble(round = grep("^rd", names(fte_predictions), value = T)[-1],
+       base_points = c(1,2,4,8,16,32))
+```
+
+```{r}
+fte_64_ep <- fte_64 %>%
+    gather("round", "odds", starts_with("rd")) %>%
+    filter(round != "rd1_win") %>%
+    left_join(point_values) %>%
+    mutate(win_points = base_points + team_seed,
+           expected_points = win_points * odds) %>%
+    select(-base_points) %>%
+    gather(variable, value, odds, win_points, expected_points) %>%
+    unite(variable, round, variable) %>%
+    spread(variable, value)
+```
+
+Now we can cycle through each round of the tournament and pick our winners based on the higher expected points value.  548 has made this easy for us by including the team_slot variable.  This column is numbered from 0 to 126. When sorted in ascending order, team that play each other will be in adjacent rows.
+
+We'll sort by the team_slot, then create a match variable to identify teams that play each other in that round. We'll then pick the teams with the higer value and append the previous rounds results to the data frame.
+
+```{r}
+build_bracket_ep <- function(data) {
+    base_points <- c(0,1,2,4,8,16,32)
+    
+    results <- fte_64_ep %>%
+        mutate(last_win = 1,
+               points = 0)
+    
+    for(round in c(2:7)) {
+        measure <- sym(paste0("rd", round, "_win_expected_points"))
+        
+        results <- results %>%
+            filter(last_win == round - 1) %>%
+            mutate(match = sort(rep(1:(nrow(.)/2), 2))) %>%
+            arrange(desc(!!measure)) %>%
+            distinct(match, .keep_all = T) %>%
+            arrange(team_slot) %>%
+            mutate(last_win = round,
+                   points = base_points[round] + team_seed,
+                   ep = !!measure) %>%
+            bind_rows(results)
+    }
+    
+    results %>%
+        group_by(team_region, team_seed, team_name, team_slot) %>%
+        summarise(last_win = max(last_win),
+                  points = sum(points),
+                  ep = sum(ep, na.rm = T)) %>%
+        ungroup()
+}
+```
+
+```{r}
+bracket <- build_bracket_ep(fte_64_ep) %>%
+    arrange(desc(last_win)) %>%
+    select(last_win, everything())
+
+bracket
+```
+
+```{r}
+bracket %>%
+    summarise(points = sum(points),
+              ep = sum(ep))
+```
+
+If this bracket performs perfectly, we'll have 431 points.
