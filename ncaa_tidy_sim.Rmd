@@ -1,0 +1,344 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+pacman::p_load(tidyverse)
+```
+
+Download 538 Data
+
+```{r}
+download.file("https://projects.fivethirtyeight.com/march-madness-api/2019/fivethirtyeight_ncaa_forecasts.csv",
+              "fivethirtyeight_2019_ncaa_forecasts.csv")
+```
+
+```{r}
+fte_forecast <- read_csv("fivethirtyeight_2019_ncaa_forecasts.csv")
+```
+
+```{r}
+fte_men <- fte_forecast %>%
+  filter(gender == "mens")
+```
+
+Code out a single simulation of the tournament.
+
+```{r}
+set.seed(11885)
+```
+
+```{r}
+first_four_winners <- fte_men %>%
+  filter(grepl("a|b", team_seed)) %>%
+  mutate(team_seed = str_replace_all(team_seed, "a|b", "")) %>%
+  group_by(team_region, team_seed) %>%
+  sample_n(size = 1, weight = rd1_win) %>%
+  ungroup()
+```
+
+```{r}
+fte_64 <- fte_men %>%
+  filter(!grepl("a|b", team_seed)) %>%
+  bind_rows(first_four_winners)
+```
+
+```{r}
+fte_64_regions <- fte_64 %>%
+  split(.$team_region)
+
+fte_64_regions
+```
+
+```{r}
+fte_east <- fte_64_regions$East
+fte_east_r1 <- fte_east %>%
+  arrange(team_slot) %>%
+  mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+  group_by(game) %>%
+  sample_n(size = 1, weight = rd2_win) %>%
+  ungroup() %>%
+  mutate("rd2_win" = TRUE)
+
+fte_east_r1
+```
+
+```{r}
+fte_east_r2 <- fte_east_r1 %>%
+  mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+  group_by(game) %>%
+  sample_n(size = 1, weight = rd3_win) %>%
+  ungroup() %>%
+  mutate("rd3_win" = TRUE)
+
+fte_east_r2
+```
+
+```{r}
+fte_east_r3 <- fte_east_r2 %>%
+  mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+  group_by(game) %>%
+  sample_n(size = 1, weight = rd4_win) %>%
+  ungroup() %>%
+  mutate("rd4_win" = TRUE)
+
+fte_east_r3
+```
+
+```{r}
+fte_east_r4 <- fte_east_r3 %>%
+  mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+  group_by(game) %>%
+  sample_n(size = 1, weight = rd5_win) %>%
+  ungroup() %>%
+  mutate("rd5_win" = TRUE)
+
+fte_east_r4
+```
+
+Let's try this as a loop...
+
+```{r}
+
+results <- fte_east %>%
+  arrange(team_slot) %>%
+  mutate(last_win = 1)
+
+for (round in c(2:5)) {
+  prior_round <- round - 1
+
+  weight_column <- sym(paste0("rd", round[1], "_win"))
+
+  results <- results %>%
+    filter(last_win == prior_round) %>%
+    mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+    group_by(game) %>%
+    sample_n(size = 1, weight = !!weight_column) %>%
+    ungroup() %>%
+    mutate(last_win = round) %>%
+    bind_rows(results)
+}
+
+results %>%
+  arrange(desc(last_win)) %>%
+  distinct(team_id, .keep_all = T) %>%
+  select(-game)
+```
+
+Now let's make it a function
+
+```{r}
+playoff_sim <- function(data, rounds = c(2:7)) {
+  results <- data %>%
+  arrange(team_slot)
+
+  for (round in rounds) {
+    prior_round <- round - 1
+  
+    weight_column <- sym(paste0("rd", round[1], "_win"))
+  
+    results <- results %>%
+      filter(last_win == prior_round) %>%
+      mutate(game = sort(rep(1:(nrow(.)/2), 2))) %>%
+      group_by(game) %>%
+      sample_n(size = 1, weight = !!weight_column) %>%
+      ungroup() %>%
+      mutate(last_win = round) %>%
+      bind_rows(results)
+  }
+  
+  results %>%
+    arrange(desc(last_win)) %>%
+    distinct(team_id, .keep_all = T) %>%
+    select(-game)
+}
+```
+
+```{r}
+fte_east %>%
+  mutate(last_win = 1) %>%
+  playoff_sim(c(2:5))
+```
+
+```{r}
+fte_64 %>%
+  mutate(last_win = 1) %>%
+  playoff_sim(rounds = c(2:5))
+```
+
+```{r}
+fte_64 %>%
+  mutate(last_win = 1) %>%
+  playoff_sim(rounds = c(2:7)) %>%
+  select(team_name, last_win, team_region, team_seed)
+```
+
+```{r}
+many_simulations <- function(seed, data, ...) {
+  set.seed(seed)
+  playoff_sim(data, ...)
+}
+```
+
+```{r}
+sim_100 <- map_df(c(1:100), many_simulations, data = mutate(fte_64, last_win = 1), .id = "simulation")
+```
+
+```{r}
+sim_100
+```
+
+```{r}
+sim_100 %>%
+  count(team_name, last_win) %>%
+  mutate(n = n/100) %>%
+  spread(key = last_win, value = n) %>%
+  arrange(desc(`7`))
+```
+
+```{r}
+sim_10000 <- map_df(c(1:10000), many_simulations, data = mutate(fte_64, last_win = 1), .id = "simulation")
+```
+
+```{r}
+sim_10000 %>%
+  count(team_name, last_win) %>%
+  mutate(n = n/10000) %>%
+  spread(key = last_win, value = n) %>%
+  arrange(desc(`4`))
+```
+
+```{r}
+sim_10000 %>%
+  count(team_region, team_seed, team_name, last_win) %>%
+  arrange(team_seed, team_name, desc(n)) %>%
+  group_by(team_name) %>%
+  mutate(outcome_order = row_number()) %>%
+  select(-n) %>%
+  spread(outcome_order, last_win) %>%
+  arrange(desc(`1`))
+
+```
+
+
+
+```{r}
+sim_10000 %>%
+  count(team)
+```
+
+
+Expected points simulation?
+
+```{r}
+points <- tibble(round = grep("^rd", names(fte_64), value = T)[-1],
+                 base_points = c(1,2,4,8,16,32))
+
+fte_64_points <- fte_64 %>%
+  mutate(team_seed = as.integer(team_seed)) %>%
+  select(-rd1_win) %>%
+  gather(key = "round", value = "odds", starts_with("rd")) %>%
+  left_join(points) %>%
+  mutate(max_points = base_points + team_seed,
+         expected_points = max_points * odds) 
+  
+```
+
+```{r}
+fte_64_points %>%
+  group_by(team_name) %>%
+  summarise_at(vars(max_points, expected_points), sum, na.rm = T) %>%
+  arrange(desc(expected_points))
+  
+```
+
+```{r}
+last_win <- 7
+team_seed <- 5
+
+base_points <- c(1,2,4,8,16,32)
+
+points <- 0
+
+for(i in (last_win - 1):1) {
+  points <- points + (base_points[i] + team_seed)
+}
+
+points
+```
+
+```{r}
+points_earned <- function(lw, ts) {
+  base_points <- c(1,2,4,8,16,32)
+  
+  if(lw == 1) {
+    return(0)
+  }
+  
+  points <- 0
+  
+  for(i in (lw - 1):1) {
+    points <- points + (base_points[i] + ts)
+  }
+  
+  points
+}
+```
+
+```{r}
+(sim_100_scores <- sim_100 %>%
+  mutate(team_seed = as.integer(team_seed)) %>%
+  mutate(points = map2_dbl(last_win, team_seed, points_earned)) %>%
+  group_by(simulation) %>%
+  summarise(total_score = sum(points)) %>%
+  arrange(desc(total_score)))
+```
+
+```{r}
+sim_100 %>%
+  filter(simulation == 6) %>%
+  arrange(desc(last_win))
+```
+
+```{r}
+(sim_10000_scores <- sim_10000 %>%
+  mutate(team_seed = as.integer(team_seed)) %>%
+  mutate(points = map2_dbl(last_win, team_seed, points_earned)) %>%
+  group_by(simulation) %>%
+  summarise(total_score = sum(points)) %>%
+  arrange(desc(total_score)))
+```
+
+```{r}
+ggplot(sim_10000_scores, aes(x = total_score)) +
+  geom_histogram()
+```
+
+```{r}
+sim_10000_scores %>%
+  count(total_score) %>%
+  arrange(desc(total_score)) %>%
+  mutate(percent = n/10000,
+         percentile = cumsum(percent)) 
+```
+
+```{r}
+scores_457 <- sim_10000_scores %>%
+  filter(total_score >= 457)
+```
+
+
+```{r}
+sim_10000 %>%
+  filter(simulation %in% scores_457$simulation) %>%
+  arrange(desc(last_win)) %>%
+  count(team_name, last_win) %>%
+  spread(last_win, n, sep = "_") %>%
+  arrange(desc(last_win_2))
+```
+
+```{r}
+sim_10000 %>%
+  filter(simulation == 6576)
+```
